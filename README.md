@@ -1,0 +1,72 @@
+# UR Sim-to-Real Reinforcement Learning
+
+A ROS 2 package for transferring reinforcement learning policies from IsaacLab to Universal Robots (UR) hardware.
+
+## Overview
+
+This package implements a bridge between trained IsaacLab policies and real UR Robots. Beforehand, you need to train a policy using IsaacLab and save it in the models/ directory. 
+
+## Dependencies
+
+
+
+- ROS 2
+- Python 3
+- PyTorch
+- RL Games
+- transforms3d
+
+You also need to install ur_simulation_gz and ur3_controller packages from official Universal Robots repositories to your ROS2 Workspace for this package to work.
+
+You need to have a working CUDA device with at least version 11.8 to run this package. For pytorch CUDA support, you can follow the instructions [here](https://pytorch.org/get-started/locally/).
+
+## Installation
+
+1. Clone this repository to your ROS 2 workspace:
+   ```
+   cd ~/ros2_ws/src
+   git clone https://github.com/kyavuzkurt/ur_sim_to_real_rl_games.git
+   ```
+
+2. Install dependencies:
+   ```
+   cd ~/ros2_ws
+   rosdep install --from-paths src --ignore-src -r -y
+   ```
+
+3. Build the package:
+   ```
+   colcon build --packages-select ur_sim_to_real_rl_games
+   ```
+
+## Usage
+Put your trained model from IsaacLab in the models/ directory.
+
+
+### Simulation
+
+To run in simulation mode:
+```
+ros2 launch ur_sim_to_real_rl_games launch_gazebo.launch.py
+```
+
+### Real Robot
+
+To deploy on a real UR robot NOTE: This is not tested yet. You might need to change some parameters before running this.
+```
+ros2 launch ur_sim_to_real_rl_games real_robot.launch.py
+```
+
+## Configuration
+
+Configuration files are available in the `config/` directory:
+- `simulation.yaml`: Settings for simulation environment
+- `real_robot.yaml`: Settings for real robot deployment
+
+## License
+
+MIT Licenses
+
+## Author
+
+Kadir Yavuz Kurt (k.yavuzkurt1@gmail.com)
