@@ -56,6 +56,26 @@ class PolicyNode(Node):
     def __init__(self):
         super().__init__('policy_node')
         
+        # Setup device for inference
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Log device information
+        if self.device.type == 'cuda':
+            gpu_count = torch.cuda.device_count()
+            current_device = torch.cuda.current_device()
+            device_name = torch.cuda.get_device_name(current_device)
+            self.get_logger().info(f"Using GPU: {device_name} (Device {current_device}, Total GPUs: {gpu_count})")
+            
+            # Log CUDA memory information
+            try:
+                allocated = torch.cuda.memory_allocated(current_device) / (1024 ** 3)  # Convert to GB
+                reserved = torch.cuda.memory_reserved(current_device) / (1024 ** 3)    # Convert to GB
+                self.get_logger().info(f"CUDA Memory - Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB")
+            except Exception as e:
+                self.get_logger().warn(f"Could not get CUDA memory info: {e}")
+        else:
+            self.get_logger().warn("GPU not available, running on CPU")
+        
         # Joint name mapping and indices
         self.joint_names = [
             'shoulder_pan_joint',
@@ -117,9 +137,6 @@ class PolicyNode(Node):
             self.get_logger().error(f"Model file not found: {model_path}")
             raise FileNotFoundError(f"Model file not found: {model_path}")
             
-        # Set device for inference
-        self.device = torch.device('cpu')
-        
         # Load the checkpoint
         self.get_logger().info(f"Loading checkpoint: {model_path}")
         try:
@@ -144,6 +161,10 @@ class PolicyNode(Node):
             
             # Create our custom actor-critic model with the correct dimensions
             self.model = ActorCritic(self.obs_dim, self.action_dim, has_gripper=self.has_gripper)
+            
+            # Explicitly move model to the specified device
+            self.model = self.model.to(self.device)
+            self.get_logger().info(f"Model moved to device: {self.device}")
             
             # Extract and load weights from checkpoint
             self.load_weights_from_checkpoint(checkpoint)
@@ -284,14 +305,15 @@ class PolicyNode(Node):
         # Transfer weights according to the mapping
         for rl_key, custom_key in key_mapping.items():
             if rl_key in rl_games_state_dict:
-                new_state_dict[custom_key] = rl_games_state_dict[rl_key]
+                # Move tensor to the correct device as we load it
+                new_state_dict[custom_key] = rl_games_state_dict[rl_key].to(self.device)
                 self.get_logger().debug(f"Mapped {rl_key} -> {custom_key} with shape {rl_games_state_dict[rl_key].shape}")
             else:
                 # If a direct match is not found, try to find a close match
                 possible_matches = [k for k in rl_games_state_dict.keys() if rl_key.split('.')[-1] in k]
                 if possible_matches:
                     self.get_logger().warn(f"Using approximate match for {rl_key}: {possible_matches[0]}")
-                    new_state_dict[custom_key] = rl_games_state_dict[possible_matches[0]]
+                    new_state_dict[custom_key] = rl_games_state_dict[possible_matches[0]].to(self.device)
                 else:
                     self.get_logger().warn(f"No match found for {rl_key}")
         
@@ -303,6 +325,10 @@ class PolicyNode(Node):
             self.get_logger().warn(f"Missing keys: {missing}")
         if unexpected:
             self.get_logger().warn(f"Unexpected keys: {unexpected}")
+            
+        # Log device information for confirmation
+        for name, param in self.model.named_parameters():
+            self.get_logger().debug(f"Parameter {name} on device: {param.device}")
     
     def timer_callback(self):
         """Timer callback to run the policy at a consistent rate."""
