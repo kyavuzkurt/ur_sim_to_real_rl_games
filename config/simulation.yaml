@@ -15,15 +15,23 @@ policy_node:
 
 controller:
   ros__parameters:
-    action_scale: 1.0
-    trajectory_duration: 0.05
+    action_scale: 0.5
+    trajectory_duration: 0.5
     min_trajectory_duration: 0.2
-    max_velocity: 1.0
-    moving_average: 0.5
+    max_velocity: 0.8
+    max_acceleration: 0.5
+    max_jerk: 1.0
+    moving_average: 0.4
+    movement_deadband: 0.001
+    zero_end_velocity: true
+    use_linear_trajectory: true
+    num_waypoints: 5  # Fewer waypoints needed in simulation
     command_topic: "/joint_trajectory_controller/joint_trajectory"
     state_topic: "/joint_states"
     use_relative_commands: false
     use_sim_time: true
+    command_rate: 10.0
+    scale_factor: 0.4
 
 target_pose_publisher:
   ros__parameters:

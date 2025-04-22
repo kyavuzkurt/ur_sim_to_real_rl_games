@@ -88,7 +88,7 @@ class PolicyNode(Node):
         self.declare_parameter('direct_joint_control', False)
         self.declare_parameter('has_gripper', False)
         self.declare_parameter('obs_dim', 25)
-        self.declare_parameter('command_rate', 5.0)  
+        self.declare_parameter('command_rate', 30.0)  
         
         model_path = self.get_parameter('model_path').value
         self.clip_actions = self.get_parameter('clip_actions').value

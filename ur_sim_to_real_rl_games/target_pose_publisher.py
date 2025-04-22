@@ -16,9 +16,9 @@ class TargetPosePublisher(Node):
         self.declare_parameter('publish_rate', 20.0)  # seconds
         
         # Declare position range parameters with specified ranges for UR10 workspace
-        self.declare_parameter('pos_x', [0.35, 0.65])  # Table workspace range for x position
+        self.declare_parameter('pos_x', [0.2, 0.3])  # Table workspace range for x position
         self.declare_parameter('pos_y', [-0.2, 0.2])   # Table workspace range for y position
-        self.declare_parameter('pos_z', [0.15, 0.5])   # Height above table for z position
+        self.declare_parameter('pos_z', [0.45, 0.5])   # Height above table for z position
         
         # Declare orientation range parameters with fixed roll and pitch for UR10
         self.declare_parameter('roll', [0.0, 0.0])        # Fixed at 0.0 for roll

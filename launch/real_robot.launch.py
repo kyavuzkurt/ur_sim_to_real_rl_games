@@ -25,37 +25,8 @@ def generate_launch_description():
     config_file = os.path.join(ur_sim_to_real_pkg_dir, 'config', 'real_robot.yaml')
     
     # Declare launch arguments
-    declared_arguments = [
-        DeclareLaunchArgument(
-            'ur_type',
-            default_value='ur10',
-            description='Type of UR robot: ur3, ur5, ur10, ur3e, ur5e, ur10e, etc.'
-        ),
-        DeclareLaunchArgument(
-            'robot_ip',
-            default_value='192.168.56.101',
-            description='IP address of the robot'
-        ),
-        DeclareLaunchArgument(
-            'use_sim_time',
-            default_value='false',
-            description='Use simulation time'
-        ),
-    ]
-    
-    # Launch the UR robot driver
-    ur_bringup_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
-            get_package_share_directory('ur_robot_driver'), 
-            '/launch/ur_control.launch.py'
-        ]),
-        launch_arguments={
-            'robot_ip': robot_ip,
-            'ur_type': ur_type,
-            'launch_rviz': 'true',
-        }.items()
-    )
-    
+
+
     # Log model path
     log_model_path = ExecuteProcess(
         cmd=['echo', f'Using model path: {model_path}'],
@@ -68,7 +39,7 @@ def generate_launch_description():
         executable='policy_node',
         name='policy_node',
         output='screen',
-        arguments=['--ros-args', '--log-level', 'debug'],
+        arguments=['--ros-args', '--log-level', 'info'],
         parameters=[
             config_file,
             {'model_path': model_path}  # Override the placeholder in config
@@ -81,7 +52,7 @@ def generate_launch_description():
         executable='controller',
         name='controller',
         output='screen',
-        arguments=['--ros-args', '--log-level', 'debug'],
+        arguments=['--ros-args', '--log-level', 'info'],
         parameters=[config_file]
     )
     
@@ -103,9 +74,8 @@ def generate_launch_description():
         parameters=[config_file]
     )
     
-    return LaunchDescription(declared_arguments + [
+    return LaunchDescription([
         log_model_path,
-        ur_bringup_launch,
         policy_node,
         controller_node,
         target_pose_publisher_node,
