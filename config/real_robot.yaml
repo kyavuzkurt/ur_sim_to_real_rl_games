@@ -2,34 +2,34 @@
 
 policy_node:
   ros__parameters:
-    model_path: "placeholder_for_model_path"  # This will be set in the launch file
+    model_path: "placeholder_for_model_path"
     clip_actions: true
-    clip_value: 3.0  # Increased to accommodate the larger output range
+    clip_value: 3.0
     target_frame: "base_link"
     state_topic: "/joint_states"
     use_sim_time: false
-    normalize_observations: true   # Normalize observations to range [-1, 1]
-    invert_target_pose: false      # Try setting to true if target poses seem reversed
-    use_tf_transform: false        # Use TF to transform poses if needed
-    direct_joint_control: true     # Indicates model outputs direct joint targets, not normalized actions
+    normalize_observations: true
+    invert_target_pose: false
+    use_tf_transform: false
+    direct_joint_control: false
 
 controller:
   ros__parameters:
-    action_scale: 1.0  # Increased from 0.5 for more pronounced movements
-    trajectory_duration: 1.0  # Increased from 0.5 to give more time to reach targets
-    min_trajectory_duration: 0.5  # Increased for smoother motion
-    max_velocity: 0.8  # Keep reduced for safety
-    moving_average: 0.9  # Increased for more aggressive motion toward targets
+    action_scale: 0.5 
+    trajectory_duration: 1.0 
+    min_trajectory_duration: 0.5 
+    max_velocity: 0.8 
+    moving_average: 0.8 
     command_topic: "/joint_trajectory_controller/joint_trajectory"
     state_topic: "/joint_states"
-    use_relative_commands: false   # Set to false as we'll use direct joint targets
+    use_relative_commands: false
     use_sim_time: false
-    scale_factor: 0.5   # Added bigger scale factor for scaled action mode if needed
+    scale_factor: 0.5  
 
 target_pose_publisher:
   ros__parameters:
     frame_id: "base_link"
-    publish_rate: 5.0  # Slower rate for real robot to avoid overwhelming
+    publish_rate: 15.0
     use_sim_time: false
 
 pose_visualizer:
