@@ -13,10 +13,6 @@ def generate_launch_description():
     # Get the package directories
     ur_sim_to_real_pkg_dir = get_package_share_directory('ur_sim_to_real_rl_games')
     
-    # Launch arguments
-    ur_type = LaunchConfiguration('ur_type', default='ur10')
-    robot_ip = LaunchConfiguration('robot_ip', default='192.168.56.101')
-    use_sim_time = LaunchConfiguration('use_sim_time', default='false')
     
     # Define model path
     model_path = os.path.join(ur_sim_to_real_pkg_dir, 'models', 'reach_ur10.pth')

@@ -16,7 +16,7 @@ This package implements a bridge between trained IsaacLab policies and real UR R
 - RL Games
 - transforms3d
 
-You also need to install ur_simulation_gz and ur3_controller packages from official Universal Robots repositories to your ROS2 Workspace for this package to work.
+You also need to install ur_simulation_gz package from official Universal Robots repositories to your ROS2 Workspace for this package to work.
 
 You need to have a working CUDA device with at least version 11.8 to run this package. For pytorch CUDA support, you can follow the instructions [here](https://pytorch.org/get-started/locally/).
 
@@ -52,7 +52,7 @@ ros2 launch ur_sim_to_real_rl_games launch_gazebo.launch.py
 
 ### Real Robot
 
-To deploy on a real UR robot NOTE: This is not tested yet. You might need to change some parameters before running this.
+To deploy on a real UR robot, while the ur_robot_driver is running, you can run the following command:
 ```
 ros2 launch ur_sim_to_real_rl_games real_robot.launch.py
 ```
