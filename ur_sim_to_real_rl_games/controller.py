@@ -6,7 +6,7 @@ import numpy as np
 import math
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float32MultiArray, Bool
 from builtin_interfaces.msg import Duration
 import traceback
 
@@ -52,6 +52,10 @@ class Controller(Node):
             (-2*self.pi, 2*self.pi),
         ]
         
+        # Initialization state tracking
+        self.initialization_complete = False
+        self.robot_ready = False
+        
         # Declare parameters
         self.declare_parameter('action_scale', 1.0)
         self.declare_parameter('trajectory_duration', 0.5)
@@ -82,6 +86,17 @@ class Controller(Node):
         self.declare_parameter('clip_actions', False)
         self.declare_parameter('clip_value', 100.0)
         self.declare_parameter('clip_observations', 100.0)
+        
+        # Initial position parameters from env.yaml
+        self.declare_parameter('initialize_robot', True)
+        self.declare_parameter('initialization_timeout', 10.0)  # seconds
+        self.declare_parameter('initialization_tolerance', 0.05)  # radians
+        self.declare_parameter('init_shoulder_pan_joint', 0.0)
+        self.declare_parameter('init_shoulder_lift_joint', -1.712)
+        self.declare_parameter('init_elbow_joint', 1.712)
+        self.declare_parameter('init_wrist_1_joint', 0.0)
+        self.declare_parameter('init_wrist_2_joint', 0.0)
+        self.declare_parameter('init_wrist_3_joint', 0.0)
         
         # Get parameters
         self.action_scale = self.get_parameter('action_scale').value
@@ -114,6 +129,21 @@ class Controller(Node):
         self.clip_value = self.get_parameter('clip_value').value
         self.clip_observations = self.get_parameter('clip_observations').value
         
+        # Get initialization parameters
+        self.initialize_robot = self.get_parameter('initialize_robot').value
+        self.initialization_timeout = self.get_parameter('initialization_timeout').value
+        self.initialization_tolerance = self.get_parameter('initialization_tolerance').value
+        
+        # Get initial joint positions
+        self.initial_joint_positions = {
+            'shoulder_pan_joint': self.get_parameter('init_shoulder_pan_joint').value,
+            'shoulder_lift_joint': self.get_parameter('init_shoulder_lift_joint').value,
+            'elbow_joint': self.get_parameter('init_elbow_joint').value,
+            'wrist_1_joint': self.get_parameter('init_wrist_1_joint').value,
+            'wrist_2_joint': self.get_parameter('init_wrist_2_joint').value,
+            'wrist_3_joint': self.get_parameter('init_wrist_3_joint').value
+        }
+        
         # Create subscriptions
         self.joint_state_sub = self.create_subscription(
             JointState, 
@@ -144,6 +174,13 @@ class Controller(Node):
             10)
         self.get_logger().info(f'Publishing to {command_topic}')
         
+        # Publisher to communicate initialization status to policy node
+        self.robot_ready_pub = self.create_publisher(
+            Bool,
+            '/robot_ready',
+            10)
+        self.get_logger().info('Publishing to /robot_ready')
+        
         if self.has_gripper:
             self.gripper_pub = self.create_publisher(
                 Float32MultiArray,
@@ -160,6 +197,7 @@ class Controller(Node):
         self.last_trajectory_end_time = None  # Track when the last trajectory should end
         self.last_action_time = self.get_clock().now()
         self.expected_action_dim = 7 if self.has_gripper else 6
+        self.initialization_start_time = None
         
         # Calculate a more conservative trajectory time based on command rate
         # Using 1.5x the command period to ensure enough time for execution
@@ -193,6 +231,139 @@ class Controller(Node):
         self.get_logger().info(f'Clip observations: {self.clip_observations}')
         self.get_logger().info(f'Using linear trajectory: {self.use_linear_trajectory}')
         self.get_logger().info(f'Number of waypoints: {self.num_waypoints}')
+        
+        # Log initialization parameters
+        self.get_logger().info(f'Initialize robot: {self.initialize_robot}')
+        if self.initialize_robot:
+            self.get_logger().info(f'Initial joint positions: {self.initial_joint_positions}')
+            self.get_logger().info(f'Initialization timeout: {self.initialization_timeout} seconds')
+            self.get_logger().info(f'Initialization tolerance: {self.initialization_tolerance} radians')
+    
+    def initialize_robot_position(self):
+        """Move the robot to the initial position specified in the parameters with improved trajectory."""
+        if self.current_joint_positions is None:
+            self.get_logger().warn("Waiting for joint state feedback before initialization")
+            return False
+        
+        # Convert from dictionary to ordered list
+        initial_positions = []
+        for joint_name in self.joint_names:
+            if joint_name in self.initial_joint_positions:
+                initial_positions.append(self.initial_joint_positions[joint_name])
+            else:
+                initial_positions.append(0.0)
+                self.get_logger().warn(f"No initial position specified for {joint_name}, using 0.0")
+        
+        # Check if robot is already at the initial position
+        at_initial_position = True
+        for i, (current, target) in enumerate(zip(self.current_joint_positions, initial_positions)):
+            if abs(current - target) > self.initialization_tolerance:
+                at_initial_position = False
+                self.get_logger().info(f"Joint {self.joint_names[i]} needs to move: {current:.4f} -> {target:.4f}")
+                break
+        
+        if at_initial_position:
+            self.get_logger().info("Robot is already at initial position")
+            return True
+        
+        # Create the initialization trajectory
+        traj_msg = JointTrajectory()
+        traj_msg.header.stamp = self.get_clock().now().to_msg()
+        traj_msg.joint_names = self.joint_names
+        
+        # Calculate an appropriate duration based on the maximum joint movement
+        max_movement = 0.0
+        for current, target in zip(self.current_joint_positions, initial_positions):
+            movement = abs(target - current)
+            max_movement = max(max_movement, movement)
+        
+        # Use a slow and safe speed for initialization
+        # For larger movements, we need more time
+        safe_velocity = self.max_velocity
+        duration = max(max_movement / safe_velocity, 2.0)  # At least 3 seconds
+        
+        self.get_logger().info(f"Moving to initial position with duration {duration:.2f} seconds")
+        
+        # Generate a multi-waypoint trajectory for smooth initialization
+        trajectory_points = self.generate_linear_trajectory(
+            self.current_joint_positions, initial_positions, duration)
+        
+        # Add points to trajectory message
+        for point_data in trajectory_points:
+            point = JointTrajectoryPoint()
+            point.positions = point_data['positions']
+            point.velocities = point_data['velocities']
+            point.accelerations = point_data['accelerations']
+            
+            # Set time from start
+            time_from_start = point_data['time_from_start']
+            sec = int(time_from_start)
+            nanosec = int((time_from_start - sec) * 1e9)
+            point.time_from_start.sec = sec
+            point.time_from_start.nanosec = nanosec
+            
+            traj_msg.points.append(point)
+        
+        # Publish the trajectory
+        self.joint_cmd_pub.publish(traj_msg)
+        self.get_logger().info(f"Published initialization trajectory with {len(trajectory_points)} waypoints")
+        
+        # Record expected end time
+        self.last_trajectory_end_time = self.get_clock().now() + rclpy.time.Duration(seconds=duration)
+        
+        return False
+    
+    def check_initialization_status(self):
+        """Check if the robot has reached the initial position."""
+        if not self.initialize_robot:
+            # If initialization is disabled, just return True
+            return True
+            
+        if self.current_joint_positions is None:
+            self.get_logger().warn("No joint positions available, cannot check initialization status")
+            return False
+            
+        # Check if initialization timeout has occurred
+        if self.initialization_start_time:
+            current_time = self.get_clock().now()
+            elapsed = (current_time - self.initialization_start_time).nanoseconds / 1e9
+            
+            if elapsed > self.initialization_timeout:
+                self.get_logger().warn(f"Initialization timeout after {elapsed:.2f} seconds")
+                self.get_logger().warn("Proceeding anyway - CHECK ROBOT POSITION!")
+                return True
+        
+        # Convert from dictionary to ordered list for comparison
+        initial_positions = []
+        for joint_name in self.joint_names:
+            if joint_name in self.initial_joint_positions:
+                initial_positions.append(self.initial_joint_positions[joint_name])
+            else:
+                initial_positions.append(0.0)
+        
+        # Check if robot is at the initial position
+        at_initial_position = True
+        for i, (current, target) in enumerate(zip(self.current_joint_positions, initial_positions)):
+            if abs(current - target) > self.initialization_tolerance:
+                at_initial_position = False
+                self.get_logger().debug(f"Joint {self.joint_names[i]} not at target: {current:.4f} vs {target:.4f}")
+                break
+        
+        if at_initial_position:
+            self.get_logger().info("Robot has reached initial position")
+            return True
+        else:
+            return False
+            
+    def publish_robot_ready_status(self, ready=True):
+        """Publish the robot ready status to inform the policy node."""
+        msg = Bool()
+        msg.data = ready
+        self.robot_ready_pub.publish(msg)
+        if ready:
+            self.get_logger().info("Published READY status - policy can now execute")
+        else:
+            self.get_logger().info("Published NOT READY status - policy execution suspended")
     
     def joint_states_callback(self, msg):
         """Process joint state messages and update current joint positions and velocities."""
@@ -231,6 +402,11 @@ class Controller(Node):
     def policy_output_callback(self, msg):
         """Process policy output and send trajectory commands to the robot."""
         try:
+            # Ignore policy outputs during initialization
+            if not self.initialization_complete:
+                self.get_logger().info('Received policy output but robot initialization is not complete yet - ignoring command')
+                return
+                
             if self.current_joint_positions is None:
                 self.get_logger().warn('Received policy output but no joint positions available yet')
                 return
@@ -439,10 +615,14 @@ class Controller(Node):
         for i in range(len(current_positions)):
             distance = abs(target_positions[i] - current_positions[i])
             
+            # Skip joints with negligible movement
+            if distance < self.movement_deadband:
+                continue
+            
             # Calculate minimum time needed at max velocity
             velocity_duration = distance / self.max_velocity
             
-            # Calculate minimum time needed at max acceleration (simplified)
+            # Calculate minimum time needed at max acceleration (uses motion equation: d = 0.5 * a * t^2)
             accel_duration = math.sqrt(2 * distance / self.max_acceleration)
             
             # Use the longer of the two times to ensure we respect both limits
@@ -450,7 +630,11 @@ class Controller(Node):
             durations.append(joint_duration)
         
         # Use the maximum duration across all joints
-        max_duration = max(durations)
+        if durations:
+            max_duration = max(durations)
+        else:
+            # If no significant movement in any joint, use minimum duration
+            max_duration = self.min_trajectory_duration / 2
         
         # Ensure duration is not shorter than min_trajectory_duration
         duration = max(max_duration, self.min_trajectory_duration)
@@ -569,23 +753,34 @@ class Controller(Node):
                 pos = current_positions[j] + alpha * (target_positions[j] - current_positions[j])
                 positions.append(pos)
             
-            # Calculate velocities (constant during segment)
+            # Calculate velocities
             velocities = []
             for j in range(len(current_positions)):
-                # Simple constant velocity for each joint
-                if i < num_points - 1:  # All points except the last one
+                # Use constant velocity for intermediate points, zero at the end if specified
+                if i < num_points - 1 or not self.zero_end_velocity:
                     velocity = (target_positions[j] - current_positions[j]) / duration
                     # Limit to max velocity
                     velocity = np.clip(velocity, -self.max_velocity, self.max_velocity)
                 else:
                     # Last point has zero velocity if specified
-                    velocity = 0.0 if self.zero_end_velocity else (
-                        (target_positions[j] - current_positions[j]) / duration)
+                    velocity = 0.0
                 
                 velocities.append(velocity)
             
-            # Set accelerations to zero for simpler control
-            accelerations = [0.0] * len(current_positions)
+            # Calculate accelerations for better control
+            accelerations = []
+            for j in range(len(current_positions)):
+                # Use acceleration primarily for the beginning and end of trajectory
+                if i == 0:  # First point - accelerate from rest
+                    accel = velocities[j] / time_interval
+                elif i == num_points - 1 and self.zero_end_velocity:  # Last point - decelerate to stop
+                    accel = -velocities[j] / time_interval
+                else:  # Middle points - maintain velocity
+                    accel = 0.0
+                
+                # Limit acceleration
+                accel = np.clip(accel, -self.max_acceleration, self.max_acceleration)
+                accelerations.append(accel)
             
             # Calculate time from start for this point
             time_from_start = i * time_interval
@@ -602,7 +797,7 @@ class Controller(Node):
         return points
 
     def publish_commands(self, actions):
-        """Publish actions as joint commands with velocity-based trajectory duration."""
+        """Process and publish actions directly to the joint trajectory controller."""
         try:
             if self.direct_joint_control:
                 target_pos = actions.copy()
@@ -613,8 +808,8 @@ class Controller(Node):
                     pre_clip = target_pos[i]
                     
                     target_pos[i] = np.clip(target_pos[i], 
-                                          max(A, -self.clip_value), 
-                                          min(B, self.clip_value))
+                                           max(A, -self.clip_value), 
+                                           min(B, self.clip_value))
                     
                     if pre_clip != target_pos[i]:
                         self.get_logger().warn(f'Joint {i} clipped from {pre_clip:.4f} to {target_pos[i]:.4f}')
@@ -622,6 +817,21 @@ class Controller(Node):
                 self.get_logger().info(f"Using raw joint targets from policy: {target_pos}")
             else:
                 target_pos = self.convert_sim_to_real_angles(actions)
+            
+            # Use the improved trajectory publishing method
+            self.publish_trajectory(target_pos)
+            
+        except Exception as e:
+            self.get_logger().error(f'Error in publish_commands: {str(e)}')
+            self.get_logger().error(traceback.format_exc())
+
+    def publish_trajectory(self, positions):
+        """Create and publish a trajectory message with improved waypoint generation."""
+        try:
+            # Check if we have received joint states
+            if self.current_joint_positions is None:
+                self.get_logger().warn("Cannot publish trajectory: no joint state information available")
+                return
             
             # Create the trajectory message
             traj_msg = JointTrajectory()
@@ -632,7 +842,7 @@ class Controller(Node):
             current_real_positions = self.remap_joint_positions_to_real_robot(self.current_joint_positions)
             
             # Get target positions in the right order for the robot
-            real_positions = self.remap_joint_positions_to_real_robot(target_pos)
+            real_positions = self.remap_joint_positions_to_real_robot(positions)
             
             # Apply smoothing to the target positions
             smoothed_positions = self.smooth_target_positions(real_positions)
@@ -661,88 +871,69 @@ class Controller(Node):
             # Update the expected end time of this trajectory
             self.last_trajectory_end_time = current_time + rclpy.time.Duration(seconds=duration)
             
-            if self.use_linear_trajectory:
-                # Generate a linear trajectory with multiple waypoints
-                trajectory_points = self.generate_linear_trajectory(
-                    current_real_positions, smoothed_positions, duration)
-                
-                # Add points to the trajectory message
-                for point_data in trajectory_points:
-                    point = JointTrajectoryPoint()
-                    point.positions = point_data['positions']
-                    point.velocities = point_data['velocities']
-                    point.accelerations = point_data['accelerations']
-                    
-                    # Set time from start
-                    time_from_start = point_data['time_from_start']
-                    sec = int(time_from_start)
-                    nanosec = int((time_from_start - sec) * 1e9)
-                    point.time_from_start.sec = sec
-                    point.time_from_start.nanosec = nanosec
-                    
-                    traj_msg.points.append(point)
-                
-                self.get_logger().info(f'Publishing linear trajectory with {len(trajectory_points)} points')
-                self.get_logger().info(f'Start positions: {trajectory_points[0]["positions"]}')
-                self.get_logger().info(f'End positions: {trajectory_points[-1]["positions"]}')
-                self.get_logger().info(f'Duration: {duration:.4f} seconds')
-            else:
-                # Use the original approach with velocity and acceleration profiles
-                # Calculate velocities for smooth motion
-                velocities = self.calculate_velocities(current_real_positions, smoothed_positions, duration)
-                
-                # For real-world stability, if we want zero end velocity, set it explicitly
-                if self.zero_end_velocity:
-                    # Target end velocity is zero
-                    end_velocities = [0.0] * len(velocities)
-                else:
-                    end_velocities = velocities
-                
-                # Calculate accelerations based on current velocities and target velocities
-                current_velocities = self.current_joint_velocities if self.current_joint_velocities else [0.0] * len(velocities)
-                accelerations = self.calculate_accelerations(current_velocities, end_velocities, duration)
-                
-                # Create trajectory point
+            # Generate a multi-waypoint trajectory for smoother motion
+            trajectory_points = self.generate_linear_trajectory(
+                current_real_positions, smoothed_positions, duration)
+            
+            # Add points to the trajectory message
+            for point_data in trajectory_points:
                 point = JointTrajectoryPoint()
-                point.positions = smoothed_positions
-                point.velocities = end_velocities
-                point.accelerations = accelerations
+                point.positions = point_data['positions']
+                point.velocities = point_data['velocities']
+                point.accelerations = point_data['accelerations']
                 
-                # Set the time from start
-                sec = int(duration)
-                nanosec = int((duration - sec) * 1e9)
+                # Set time from start
+                time_from_start = point_data['time_from_start']
+                sec = int(time_from_start)
+                nanosec = int((time_from_start - sec) * 1e9)
                 point.time_from_start.sec = sec
                 point.time_from_start.nanosec = nanosec
                 
-                # Add the point to the trajectory
                 traj_msg.points.append(point)
-                
-                # Log the trajectory details
-                self.get_logger().info(f'Publishing trajectory: {traj_msg.joint_names}')
-                self.get_logger().info(f'Target positions: {smoothed_positions}')
-                self.get_logger().info(f'Velocities: {velocities}')
-                self.get_logger().info(f'Accelerations: {accelerations}')
-                self.get_logger().info(f'Duration: {duration:.4f} seconds ({sec}s {nanosec}ns)')
             
             # Publish the trajectory
             self.joint_cmd_pub.publish(traj_msg)
-            self.get_logger().debug('Trajectory published successfully')
-        except Exception as e:
-            self.get_logger().error(f'Error in publish_commands: {str(e)}')
-            self.get_logger().error(traceback.format_exc())
-
-    def publish_trajectory(self, positions):
-        """Create and publish a trajectory message."""
-        try:
-            # Use the publish_commands method for all trajectories to ensure
-            # proper velocity and acceleration profiles
-            self.publish_commands(positions)
+            self.get_logger().info(f'Published trajectory with {len(trajectory_points)} waypoints, duration: {duration:.2f}s')
+            self.get_logger().debug(f'Start positions: {trajectory_points[0]["positions"]}')
+            self.get_logger().debug(f'End positions: {trajectory_points[-1]["positions"]}')
+            
         except Exception as e:
             self.get_logger().error(f'Error in publish_trajectory: {str(e)}')
             self.get_logger().error(traceback.format_exc())
 
     def timer_callback(self):
-        """Timer callback to enforce consistent command rate."""
+        """Timer callback to enforce consistent command rate and handle initialization."""
+        # First, check if we have received joint states
+        if self.current_joint_positions is None:
+            self.get_logger().debug("Waiting for joint states...")
+            return
+        
+        # Handle initialization sequence
+        if not self.initialization_complete:
+            # Start initialization timer if not started
+            if self.initialization_start_time is None:
+                self.initialization_start_time = self.get_clock().now()
+                self.get_logger().info("Starting robot initialization sequence")
+            
+            # Try to initialize robot position
+            if self.initialize_robot and not self.robot_ready:
+                # Send the robot to initial position
+                init_success = self.initialize_robot_position()
+                if init_success:
+                    self.robot_ready = True
+            
+            # Check if initialization is complete
+            if self.robot_ready or self.check_initialization_status():
+                self.robot_ready = True
+                self.initialization_complete = True
+                self.publish_robot_ready_status(True)
+                self.get_logger().info("Initialization complete - ready for policy execution")
+            else:
+                # Still initializing
+                self.publish_robot_ready_status(False)
+                self.get_logger().debug("Continuing initialization process...")
+        
+        # Debug logging for joint positions
         if self.current_joint_positions is not None:
             self.get_logger().debug(f'Current joint positions: {self.current_joint_positions}')
 

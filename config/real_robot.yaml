@@ -9,29 +9,29 @@ policy_node:
     state_topic: "/joint_states"
     use_sim_time: false
     normalize_observations: true
-    invert_target_pose: false
+    invert_target_pose: true
     use_tf_transform: false
     direct_joint_control: false
 
 controller:
   ros__parameters:
-    action_scale: 0.2
+    action_scale: 50.0
     trajectory_duration: 2.0
     min_trajectory_duration: 1.2
-    max_velocity: 0.3
-    max_acceleration: 0.2
+    max_velocity: 0.5
+    max_acceleration: 0.3
     max_jerk: 0.5
     moving_average: 0.3
-    movement_deadband: 0.003
+    movement_deadband: 0.0001
     zero_end_velocity: true
     use_linear_trajectory: true
-    num_waypoints: 8  # Using more waypoints for smoother motion
+    num_waypoints: 10  # Using more waypoints for smoother motion
     command_topic: "/joint_trajectory_controller/joint_trajectory"
     state_topic: "/joint_states"
     use_relative_commands: false
     use_sim_time: false
     scale_factor: 0.2
-    command_rate: 2.0  # Reduced further to avoid overwhelming the controller
+    command_rate: 2.0
 
 target_pose_publisher:
   ros__parameters:

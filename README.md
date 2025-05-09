@@ -13,10 +13,7 @@ This package implements a bridge between trained IsaacLab policies and real UR R
 - ROS 2
 - Python 3
 - PyTorch
-- RL Games
-- transforms3d
-
-You also need to install ur_simulation_gz package from official Universal Robots repositories to your ROS2 Workspace for this package to work.
+- [Universal_Robots_ROS2_GZ_Simulation](https://github.com/UniversalRobots/Universal_Robots_ROS2_GZ_Simulation) package installed in your ROS 2 workspace
 
 You need to have a working CUDA device with at least version 11.8 to run this package. For pytorch CUDA support, you can follow the instructions [here](https://pytorch.org/get-started/locally/).
 

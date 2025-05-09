@@ -8,7 +8,7 @@ import torch.nn as nn
 import os
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped
-from std_msgs.msg import Float32MultiArray, MultiArrayDimension
+from std_msgs.msg import Float32MultiArray, MultiArrayDimension, Bool
 import tf2_ros
 from tf2_ros import TransformException
 from tf2_geometry_msgs import do_transform_pose
@@ -76,9 +76,12 @@ class PolicyNode(Node):
             'wrist_3_joint': 5
         }
         
-        self.declare_parameter('model_path', 'reach_ur10.pth')
+        # Add robot initialization tracking
+        self.robot_ready = False
+        
+        self.declare_parameter('model_path', 'reach_ur3.pth')
         self.declare_parameter('clip_actions', False)
-        self.declare_parameter('clip_value', 100.0)
+        self.declare_parameter('clip_value', 1.0)
         self.declare_parameter('clip_observations', 100.0)
         self.declare_parameter('target_frame', 'base_link')
         self.declare_parameter('state_topic', '/joint_states')
@@ -146,6 +149,14 @@ class PolicyNode(Node):
             self.get_logger().error(traceback.format_exc())
             raise
         
+        # Subscribe to robot ready status first
+        self.robot_ready_sub = self.create_subscription(
+            Bool,
+            '/robot_ready',
+            self.robot_ready_callback,
+            10)
+        self.get_logger().info('Subscribed to /robot_ready')
+        
         self.joint_state_sub = self.create_subscription(
             JointState, 
             state_topic, 
@@ -194,9 +205,11 @@ class PolicyNode(Node):
         self.timer = self.create_timer(1.0 / self.command_rate, self.timer_callback)
         self.get_logger().info(f'Created timer at {self.command_rate} Hz')
         
+        # Configure scaling factors based on env.yaml
         self.joint_pos_scale = np.pi
         self.joint_vel_scale = 3.0
-        self.target_pos_scale = 1.0
+        self.target_pos_scale = 0.5
+        self.target_orient_scale = np.pi
         
         self.get_logger().info('Policy node initialized')
         self.get_logger().info(f'Target frame: {self.target_frame}')
@@ -208,7 +221,18 @@ class PolicyNode(Node):
         self.get_logger().info(f'Observation dimension: {self.obs_dim}')
         self.get_logger().info(f'Action dimension: {self.action_dim}')
         self.get_logger().info(f'Command rate: {self.command_rate} Hz')
+        self.get_logger().info(f'Waiting for robot to be ready...')
     
+    def robot_ready_callback(self, msg):
+        """Handle robot ready status messages from the controller."""
+        ready = msg.data
+        if ready and not self.robot_ready:
+            self.robot_ready = True
+            self.get_logger().info("Received READY signal - policy will execute")
+        elif not ready and self.robot_ready:
+            self.robot_ready = False
+            self.get_logger().info("Received NOT READY signal - policy execution suspended")
+        
     def verify_dimensions(self):
         """
         Verify that the specified dimensions match the expected neural network structure.
@@ -276,6 +300,11 @@ class PolicyNode(Node):
     
     def timer_callback(self):
         """Timer callback to run the policy at a consistent rate."""
+        # Only run the policy if robot is ready
+        if not self.robot_ready:
+            self.get_logger().debug('Robot not ready yet, waiting for initialization to complete')
+            return
+            
         if self.current_joint_positions is not None and self.target_pose is not None:
             self.run_policy()
         else:
@@ -326,7 +355,7 @@ class PolicyNode(Node):
                 transformed_pose = do_transform_pose(msg, transform)
                 transformed_pose.header.frame_id = self.target_frame
                 
-                self.get_logger().info(f'Transformed pose from {msg.header.frame_id} to {self.target_frame}')
+                self.get_logger().debug(f'Transformed pose from {msg.header.frame_id} to {self.target_frame}')
                 self.target_pose = transformed_pose
             except TransformException as ex:
                 self.get_logger().error(f'Failed to transform pose: {ex}')
@@ -350,14 +379,30 @@ class PolicyNode(Node):
             inverted_pose.pose.orientation.z = self.target_pose.pose.orientation.z
             
             self.target_pose = inverted_pose
-            self.get_logger().info("Applied coordinate inversion to target pose")
+            self.get_logger().debug("Applied coordinate inversion to target pose")
+            
+            q = np.array([inverted_pose.pose.orientation.w,
+                          inverted_pose.pose.orientation.x,
+                          inverted_pose.pose.orientation.y,
+                          inverted_pose.pose.orientation.z])
+            q /= np.linalg.norm(q)  # Normalize
+            inverted_pose.pose.orientation.w = q[0]
+            inverted_pose.pose.orientation.x = q[1]
+            inverted_pose.pose.orientation.y = q[2]
+            inverted_pose.pose.orientation.z = q[3]
         
-        self.get_logger().info(f'Using target pose in frame {self.target_pose.header.frame_id}: pos=[{self.target_pose.pose.position.x:.3f}, {self.target_pose.pose.position.y:.3f}, {self.target_pose.pose.position.z:.3f}], '
+        self.get_logger().debug(f'Using target pose in frame {self.target_pose.header.frame_id}: pos=[{self.target_pose.pose.position.x:.3f}, {self.target_pose.pose.position.y:.3f}, {self.target_pose.pose.position.z:.3f}], '
                               f'orient=[{self.target_pose.pose.orientation.w:.3f}, {self.target_pose.pose.orientation.x:.3f}, {self.target_pose.pose.orientation.y:.3f}, {self.target_pose.pose.orientation.z:.3f}]')
         
         self.transformed_pose_pub.publish(self.target_pose)
         
         self.get_logger().debug('Target pose received, will be used in next timer cycle')
+        
+        if not (0.35 <= self.target_pose.pose.position.x <= 0.65 and
+                -0.2 <= self.target_pose.pose.position.y <= 0.2 and
+                0.15 <= self.target_pose.pose.position.z <= 0.5):
+            self.get_logger().error(f"Invalid target position: {self.target_pose.pose.position}")
+            return
     
     def run_policy(self):
         """
@@ -370,6 +415,11 @@ class PolicyNode(Node):
         4. Optionally publishes gripper action (1 element) if gripper is present
         """
         try:
+            # Check if robot is ready - safety check
+            if not self.robot_ready:
+                self.get_logger().warn("Robot not ready, skipping policy execution")
+                return
+                
             if self.current_joint_positions is None:
                 self.get_logger().warn("Missing joint positions, cannot run policy")
                 return
@@ -391,8 +441,8 @@ class PolicyNode(Node):
                 action_np = mu.cpu().numpy()[0]
                 value_np = value.cpu().numpy()[0]
                 
-                self.get_logger().info(f'Raw model output (action): {action_np}')
-                self.get_logger().info(f'Value estimate: {value_np}')
+                self.get_logger().debug(f'Raw model output (action): {action_np}')
+                self.get_logger().debug(f'Value estimate: {value_np}')
                 
                 if 'log_std' in extras:
                     log_std = extras['log_std'].cpu().numpy()
@@ -423,8 +473,12 @@ class PolicyNode(Node):
                 arm_actions = action_np[:6]
                 gripper_action = action_np[6:7]
                 
-                self.get_logger().info(f'Arm actions: {arm_actions}')
-                self.get_logger().info(f'Gripper action: {gripper_action}')
+                self.get_logger().debug(f'Arm actions: {arm_actions}')
+                self.get_logger().debug(f'Gripper action: {gripper_action}')
+                
+                # Scale actions to match simulation PD control
+                arm_actions = arm_actions * 0.05  # Gentle scaling
+                self.get_logger().debug(f"Scaled joint targets: {arm_actions}")
                 
                 self.publish_policy_output(arm_actions)
                 
@@ -440,15 +494,20 @@ class PolicyNode(Node):
                 arm_actions = action_np
                 
                 if self.direct_joint_control:
-                    self.get_logger().info("Using direct joint control mode - policy outputs are direct joint targets")
+                    self.get_logger().debug("Using direct joint control mode - policy outputs are direct joint targets")
                     
                     if self.normalize_observations:
-                        if np.all(np.abs(arm_actions) <= self.clip_value):
-                            self.get_logger().debug("Actions appear to be in expected range for joint targets")
-                        else:
-                            self.get_logger().warn("Actions out of typical joint angle range, they may need scaling")
+                        self.get_logger().debug("Actions appear to be in expected range...")
                 
                 self.publish_policy_output(arm_actions)
+            
+            self.get_logger().debug(f"Action Details:")
+            self.get_logger().debug(f"Raw: {action_np.tolist()}")
+            self.get_logger().debug(f"Min: {np.min(action_np):.3f} Max: {np.max(action_np):.3f}")
+            self.get_logger().debug(f"Mean: {np.mean(action_np):.3f} Std: {np.std(action_np):.3f}")
+            
+            self.get_logger().debug(f"Scaled Actions: {arm_actions.tolist()}")
+            self.get_logger().debug(f"Joint Movement: {(arm_actions - self.current_joint_positions).tolist()}")
             
         except Exception as e:
             self.get_logger().error(f'Error in run_policy: {str(e)}')
@@ -534,7 +593,7 @@ class PolicyNode(Node):
             euler_angles = np.array(quat2euler(quat))
             
             if self.normalize_observations:
-                euler_angles = euler_angles / np.pi
+                euler_angles = euler_angles / self.target_orient_scale
                 euler_angles = np.clip(euler_angles, -self.clip_observations, self.clip_observations)
             
         self.get_logger().debug(f"Target orientation (euler): {euler_angles}")
@@ -569,6 +628,11 @@ class PolicyNode(Node):
             obs.extend([0.0] * pad_count)
         
         self.get_logger().debug(f"Final observation dimension: {len(obs)}")
+        
+        self.get_logger().debug(f"Normalized Observation Summary:")
+        self.get_logger().debug(f"Joints: {np.array(joint_pos).tolist()}")
+        self.get_logger().debug(f"Target Pos: {target_pos.tolist()}")
+        self.get_logger().debug(f"Target Orient: {euler_angles.tolist()}")
         
         return np.array(obs, dtype=np.float32)
     
